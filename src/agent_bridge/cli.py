@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from agent_bridge.paths import bundled_skill, ensure_home
+from agent_bridge.paths import bridge_home, bundled_skill, ensure_home
+from agent_bridge.persist import atomic_write_text
 from agent_bridge.processes import count_sibling_servers
 from agent_bridge.worker_env import is_worker_context
 
@@ -26,6 +28,7 @@ SKILL_RELATIVE = (
     Path(".codex") / "skills" / "agent-bridge" / "SKILL.md",
     Path(".kimi-code") / "skills" / "agent-bridge" / "SKILL.md",
     Path(".zcode") / "skills" / "agent-bridge" / "SKILL.md",
+    Path(".claude") / "skills" / "agent-bridge" / "SKILL.md",
 )
 
 HELP = f"""Agent Bridge — connect local coding agents.
@@ -33,6 +36,7 @@ HELP = f"""Agent Bridge — connect local coding agents.
 Usage:
   agent-bridge                 start the MCP server on stdio
   agent-bridge --env           print reconstructed worker environment
+  agent-bridge --quota         print each worker's remaining quota (fresh, no cache)
   agent-bridge --version       print the installed version
   agent-bridge upgrade         one-command update (close coordinators first)
   agent-bridge install-skill   copy the coordinator skill into host skill dirs
@@ -41,9 +45,10 @@ Usage:
 Install:
   uv tool install {GIT_SOURCE}
 
-Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, or Grok
-Build. Skill files are written automatically the first time a top-level
-coordinator starts the server.
+Then register the MCP server in Codex, Cursor, Kimi Code, ZCode, Grok
+Build, or Claude Code (Devin reads the Cursor entry). Skill files are written when a top-level
+coordinator first starts the server and refreshed after each upgrade;
+ordinary restarts leave your local edits alone.
 
 Update:
   agent-bridge upgrade
@@ -103,6 +108,11 @@ def checkout_root(start: Path | None = None) -> Path | None:
     return None
 
 
+def skill_stamp_path(home: Path | None = None) -> Path:
+    root = bridge_home() if home is None else home / ".agent-bridge"
+    return root / "skill.sha256"
+
+
 def ensure_coordinator_skill(*, home: Path | None = None) -> list[Path]:
     """Drop the skill into host skill dirs. Fail-open; skip under pytest.
 
@@ -116,7 +126,19 @@ def ensure_coordinator_skill(*, home: Path | None = None) -> list[Path]:
     if os.environ.get("AGENT_BRIDGE_SKIP_SKILL") == "1":
         return []
     try:
-        return install_skill(home=home)
+        text = bundled_skill().read_text(encoding="utf-8")
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        stamp = skill_stamp_path(home)
+        try:
+            current = stamp.read_text(encoding="utf-8").strip()
+        except OSError:
+            current = ""
+        if current == digest:
+            return []
+        written = install_skill(home=home)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(stamp, digest + "\n")
+        return written
     except OSError:
         log.warning("could not install coordinator skill", exc_info=True)
         return []
@@ -126,13 +148,13 @@ def install_skill(*, home: Path | None = None, only_existing: bool = False) -> l
     source = bundled_skill()
     if not source.is_file():
         raise FileNotFoundError(f"bundled skill not found at {source}")
-    text = source.read_text(encoding="utf-8")
+    content = source.read_bytes()
     written: list[Path] = []
     for dest in skill_destinations(home or Path.home()):
         if only_existing and not dest.is_file():
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+        dest.write_bytes(content)
         written.append(dest)
     return written
 
@@ -207,6 +229,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         from agent_bridge.worker_env import describe_env
 
         print(json.dumps(describe_env(load_config().env), indent=2, ensure_ascii=False))
+        return
+    if command in {"--quota", "quota"}:
+        import asyncio
+
+        from agent_bridge.config import load_config
+        from agent_bridge.quota import describe_quotas
+
+        print(json.dumps(asyncio.run(describe_quotas(load_config())), indent=2, ensure_ascii=False))
         return
     if command in {"install-skill", "--install-skill"}:
         written = install_skill()

@@ -1,9 +1,12 @@
+import asyncio
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from agent_bridge.paths import pids_path
@@ -11,9 +14,12 @@ from agent_bridge.persist import atomic_write_json, read_json
 from agent_bridge.processes import (
     count_sibling_servers,
     drop_pid,
+    interrupt_then_reap,
+    kill_tree,
     process_create_time,
     process_image_name,
     reap_orphans,
+    reap_subprocess,
     record_pid,
     resolve_command,
 )
@@ -36,13 +42,15 @@ def test_skips_grok_agent_as_cursor(monkeypatch, tmp_path):
     grok_agent.write_text("fake", encoding="utf-8")
 
     def fake_which(name: str):
-        if name in {"agent", "agent.exe"}:
+        if Path(name).name.lower() in {"agent", "agent.exe"}:
             return str(grok_agent)
         return None
 
     monkeypatch.setattr("agent_bridge.processes.resolve_executable", fake_which)
     with pytest.raises(FileNotFoundError, match="not Cursor"):
         resolve_command(["cursor-agent", "acp"], [["agent", "acp"]])
+    with pytest.raises(FileNotFoundError, match="not Cursor"):
+        resolve_command([str(grok_agent), "acp"])
 
 
 def test_resolve_command_skips_invalid_candidate(tmp_path: Path):
@@ -287,6 +295,113 @@ def test_count_sibling_servers_other_host_nested_bridge_counts_once(monkeypatch)
     assert count_sibling_servers(procs) == 1
 
 
+def test_kill_tree_does_not_wait(monkeypatch):
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.wait_procs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait_procs")),
+    )
+    child = subprocess.Popen(SLEEPER)
+    try:
+        kill_tree(child.pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+
+
+def test_kill_tree_falls_back_to_handle_when_psutil_misses(monkeypatch):
+    calls: list[str] = []
+    handle = SimpleNamespace(returncode=None)
+    handle.terminate = lambda: calls.append("terminate")
+    handle.kill = lambda: calls.append("kill")
+
+    def boom(_pid):
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+    kill_tree(2_000_000_001, handle=handle)
+    assert calls == ["terminate"]
+
+
+def test_kill_tree_without_handle_is_noop_when_psutil_misses(monkeypatch):
+    def boom(_pid):
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+    kill_tree(2_000_000_001)
+
+
+def test_kill_tree_skips_finished_handle(monkeypatch):
+    calls: list[str] = []
+    handle = SimpleNamespace(returncode=0)
+    handle.terminate = lambda: calls.append("terminate")
+    handle.kill = lambda: calls.append("kill")
+
+    def boom(_pid):
+        raise psutil.NoSuchProcess(_pid)
+
+    monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+    kill_tree(2_000_000_001, handle=handle)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_reap_subprocess_does_not_call_wait_procs(monkeypatch):
+    monkeypatch.setattr(
+        "agent_bridge.processes.psutil.wait_procs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait_procs")),
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *SLEEPER,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await reap_subprocess(proc, timeout=2)
+        assert proc.returncode is not None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_reap_subprocess_stops_child_when_psutil_cannot_see_pid(monkeypatch):
+    proc = await asyncio.create_subprocess_exec(
+        *SLEEPER,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+
+        def boom(_pid):
+            raise psutil.NoSuchProcess(_pid)
+
+        monkeypatch.setattr("agent_bridge.processes.psutil.Process", boom)
+        await reap_subprocess(proc, timeout=2)
+        assert proc.returncode is not None
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_reap_subprocess_kills_when_wait_times_out():
+    handle = SimpleNamespace(pid=None, returncode=None)
+    handle.terminate = lambda: None
+
+    async def hang():
+        if handle.returncode is None:
+            await asyncio.sleep(100)
+        return handle.returncode
+
+    handle.wait = hang
+    handle.kill = lambda: setattr(handle, "returncode", -9)
+    await reap_subprocess(handle, timeout=0.05)
+    assert handle.returncode == -9
+
+
 def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):
     record_pid(tmp_path, "sess_keep", os.getpid(), 1.0, "python.exe")
     assert "sess_keep" in read_json(pids_path(tmp_path), {})
@@ -297,3 +412,45 @@ def test_record_and_drop_pid_swallow_oserror(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("agent_bridge.processes.atomic_write_json", boom)
     record_pid(tmp_path, "sess_new", os.getpid(), 1.0, "python.exe")
     drop_pid(tmp_path, "sess_keep")
+
+
+@pytest.mark.asyncio
+async def test_interrupt_escalates_at_once_when_signal_fails(monkeypatch):
+    async def never_wait():
+        await asyncio.sleep(10)
+
+    reaped: list[object] = []
+
+    async def fake_reap(proc, timeout=5.0):
+        reaped.append(proc)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("no console")
+
+    proc = SimpleNamespace(pid=4242, returncode=None, wait=never_wait, send_signal=boom)
+    monkeypatch.setattr("agent_bridge.processes.os.kill", boom)
+    monkeypatch.setattr("agent_bridge.processes.reap_subprocess", fake_reap)
+    started = time.monotonic()
+    await interrupt_then_reap(proc, timeout=3)
+    assert time.monotonic() - started < 1
+    assert reaped == [proc]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_skips_reap_when_wait_returns(monkeypatch):
+    async def immediate_wait():
+        return None
+
+    reaped: list[object] = []
+
+    async def fake_reap(proc, timeout=5.0):
+        reaped.append(proc)
+
+    def ok_signal(*_args, **_kwargs):
+        return None
+
+    proc = SimpleNamespace(pid=4242, returncode=None, wait=immediate_wait, send_signal=ok_signal)
+    monkeypatch.setattr("agent_bridge.processes.os.kill", ok_signal)
+    monkeypatch.setattr("agent_bridge.processes.reap_subprocess", fake_reap)
+    await interrupt_then_reap(proc, timeout=3)
+    assert reaped == []

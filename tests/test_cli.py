@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +11,7 @@ from agent_bridge.cli import (
     install_skill,
     main,
     skill_destinations,
+    skill_stamp_path,
     upgrade,
 )
 from agent_bridge.paths import bundled_skill
@@ -37,10 +37,11 @@ def test_detect_checkout():
     assert (checkout_root() / "pyproject.toml").is_file()
 
 
-def test_skill_destinations_include_zcode(tmp_path):
+def test_skill_destinations_include_zcode_and_claude(tmp_path):
     dests = skill_destinations(tmp_path)
     assert any(part == ".zcode" for dest in dests for part in dest.parts)
-    assert dests[-1] == tmp_path / ".zcode" / "skills" / "agent-bridge" / "SKILL.md"
+    assert any(part == ".claude" for dest in dests for part in dest.parts)
+    assert dests[-1] == tmp_path / ".claude" / "skills" / "agent-bridge" / "SKILL.md"
 
 
 def test_install_skill_writes_host_dirs(tmp_path):
@@ -52,7 +53,7 @@ def test_install_skill_writes_host_dirs(tmp_path):
     assert zcode.is_file()
     for dest in expected:
         assert dest.is_file()
-        assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+        assert dest.read_bytes() == bundled_skill().read_bytes()
 
 
 def test_install_skill_only_existing(tmp_path):
@@ -61,7 +62,7 @@ def test_install_skill_only_existing(tmp_path):
     dest.write_text("old", encoding="utf-8")
     written = install_skill(home=tmp_path, only_existing=True)
     assert written == [dest]
-    assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+    assert dest.read_bytes() == bundled_skill().read_bytes()
     assert not (tmp_path / ".codex" / "skills" / "agent-bridge" / "SKILL.md").exists()
 
 
@@ -84,7 +85,7 @@ def test_upgrade_uv_tool(monkeypatch, tmp_path):
 
     notes = upgrade(kind="uv-tool", siblings=0, run=fake_run)
     assert calls == [["/bin/uv", "tool", "upgrade", "agent-bridge"]]
-    assert dest.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+    assert dest.read_bytes() == bundled_skill().read_bytes()
     assert any("uv tool upgrade" in note for note in notes)
 
 
@@ -97,6 +98,7 @@ def test_help_and_version(capsys):
     main(["help"])
     out = capsys.readouterr().out
     assert "uv tool install" in out
+    assert "Claude Code" in out
     assert "install-skill" not in out.split("Install:")[1].split("Update:")[0]
     main(["--version"])
     assert capsys.readouterr().out.strip()
@@ -122,3 +124,39 @@ def test_install_skill_works_in_worker_context(tmp_path, monkeypatch):
     written = install_skill(home=tmp_path)
     assert written
     assert (tmp_path / ".zcode" / "skills" / "agent-bridge" / "SKILL.md").is_file()
+
+
+def test_ensure_coordinator_skill_keeps_local_edits_until_bundle_changes(tmp_path, monkeypatch):
+    written = ensure_coordinator_skill(home=tmp_path)
+    assert len(written) == 6
+    stamp = skill_stamp_path(tmp_path)
+    assert stamp.is_file()
+    local = tmp_path / ".codex" / "skills" / "agent-bridge" / "SKILL.md"
+    local.write_text("mine", encoding="utf-8")
+    old_digest = stamp.read_text(encoding="utf-8").strip()
+    assert ensure_coordinator_skill(home=tmp_path) == []
+    assert local.read_text(encoding="utf-8") == "mine"
+    new_skill = tmp_path / "new_SKILL.md"
+    new_skill.write_text("# changed coordinator skill\n", encoding="utf-8")
+    monkeypatch.setattr("agent_bridge.cli.bundled_skill", lambda: new_skill)
+    rewritten = ensure_coordinator_skill(home=tmp_path)
+    assert len(rewritten) == 6
+    for dest in rewritten:
+        assert dest.read_text(encoding="utf-8") == "# changed coordinator skill\n"
+    assert stamp.read_text(encoding="utf-8").strip() != old_digest
+
+
+def test_install_skill_ignores_stamp(tmp_path):
+    ensure_coordinator_skill(home=tmp_path)
+    local = tmp_path / ".codex" / "skills" / "agent-bridge" / "SKILL.md"
+    local.write_text("mine", encoding="utf-8")
+    written = install_skill(home=tmp_path)
+    assert written
+    assert local.read_text(encoding="utf-8") == bundled_skill().read_text(encoding="utf-8")
+
+
+def test_ensure_coordinator_skill_survives_unreadable_stamp(tmp_path):
+    stamp = skill_stamp_path(tmp_path)
+    stamp.mkdir(parents=True)
+    result = ensure_coordinator_skill(home=tmp_path)
+    assert result == [] or all(path.is_file() for path in result)

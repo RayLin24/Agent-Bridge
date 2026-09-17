@@ -9,6 +9,8 @@
 ```powershell
 uv sync --extra dev
 uv run pytest
+uv run ruff check .
+uv run mypy
 ```
 
 真实协调者联调只用本机 `lab/`（不进 git）。先跑 `uv run --no-sync python scripts/setup_lab.py`，再用宿主打开那个文件夹——不要开仓库根，也不要开 `tests/`。
@@ -19,7 +21,7 @@ uv run pytest
 
 ## 接入新 Coordinator
 
-证明一个新宿主能通过 MCP 调度现有 Worker 是另一套流程：[skills/add-coordinator/SKILL.md](skills/add-coordinator/SKILL.md)。那份 skill 不加 adapter，也不加 worker 配置项。声称 Codex、Cursor、Kimi Code、ZCode 或 Grok Build 已支持之前，先读它。
+证明一个新宿主能通过 MCP 调度现有 Worker 是另一套流程：[skills/add-coordinator/SKILL.md](skills/add-coordinator/SKILL.md)。那份 skill 不加 adapter，也不加 worker 配置项。声称 Codex、Cursor、Kimi Code、ZCode、Grok Build 或 Claude Code 已支持之前，先读它。
 
 ## Pull request
 

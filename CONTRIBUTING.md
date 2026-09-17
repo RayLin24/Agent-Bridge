@@ -9,6 +9,8 @@ This is the source checkout. End users install with `uv tool install git+https:/
 ```powershell
 uv sync --extra dev
 uv run pytest
+uv run ruff check .
+uv run mypy
 ```
 
 Live coordinator drills use a local `lab/` folder (not in git). Run `uv run --no-sync python scripts/setup_lab.py`, then open that folder in the host — not the repo root and not `tests/`.
@@ -19,7 +21,7 @@ Connecting a new agent CLI has its own process: [skills/add-worker/SKILL.md](ski
 
 ## Adding a coordinator
 
-Proving a new host can drive existing workers over MCP is a different process: [skills/add-coordinator/SKILL.md](skills/add-coordinator/SKILL.md). That skill does not add adapters or worker entries. Read it before claiming Codex, Cursor, Kimi Code, ZCode, or Grok Build support is complete.
+Proving a new host can drive existing workers over MCP is a different process: [skills/add-coordinator/SKILL.md](skills/add-coordinator/SKILL.md). That skill does not add adapters or worker entries. Read it before claiming Codex, Cursor, Kimi Code, ZCode, Grok Build, or Claude Code support is complete.
 
 ## Pull requests
 

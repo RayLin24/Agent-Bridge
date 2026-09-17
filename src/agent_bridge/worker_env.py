@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -164,7 +165,7 @@ def parse_powershell_grok_proxy(text: str) -> dict[str, str]:
     never run when Bridge spawn the raw executable. Scan those function
     bodies first so a machine that only set the proxy there still works.
     """
-    for name in ("grok", "opencode", "kimi", "agy"):
+    for name in ("grok", "opencode", "kimi", "agy", "claude", "codex"):
         body = extract_powershell_function(text, name)
         if not body:
             continue
@@ -211,7 +212,7 @@ def read_powershell_grok_proxy() -> dict[str, str]:
 
 
 def read_registry_environment(hive: int, subkey: str) -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -236,7 +237,7 @@ def read_registry_environment(hive: int, subkey: str) -> dict[str, str]:
 
 
 def read_windows_user_env() -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -244,7 +245,7 @@ def read_windows_user_env() -> dict[str, str]:
 
 
 def read_windows_machine_env() -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -263,7 +264,7 @@ def read_windows_machine_proxy() -> dict[str, str]:
 
 
 def read_internet_settings_proxy() -> dict[str, str]:
-    if os.name != "nt":
+    if sys.platform != "win32":
         return {}
     import winreg
 
@@ -417,10 +418,9 @@ def resolve_env(
         _assign(env, origin, {str(k): str(v) for k, v in agent_env.items()}, "agent.env")
 
     _mirror_proxy_keys(env, origin)
-    if _present(env, "HTTPS_PROXY") or _present(env, "HTTP_PROXY"):
-        if not _present(env, "NO_PROXY"):
-            env["NO_PROXY"] = DEFAULT_NO_PROXY
-            origin["NO_PROXY"] = "default"
+    if (_present(env, "HTTPS_PROXY") or _present(env, "HTTP_PROXY")) and not _present(env, "NO_PROXY"):
+        env["NO_PROXY"] = DEFAULT_NO_PROXY
+        origin["NO_PROXY"] = "default"
     env.setdefault("PYTHONIOENCODING", "utf-8")
     origin.setdefault("PYTHONIOENCODING", origin.get("PYTHONIOENCODING", "default"))
     return env, origin

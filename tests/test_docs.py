@@ -7,7 +7,7 @@ def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
-def test_readme_and_setup_list_zcode_and_grok_coordinators():
+def test_readme_and_setup_list_zcode_grok_and_claude_coordinators():
     readme = _read("README.md")
     setup = _read("SETUP.md")
     for text in (readme, setup):
@@ -16,6 +16,7 @@ def test_readme_and_setup_list_zcode_and_grok_coordinators():
         assert "Codex" in text
         assert "Cursor" in text
         assert "Kimi Code" in text
+        assert "Claude Code" in text
 
 
 def test_setup_keeps_zcode_ui_and_native_shapes_distinct():
@@ -47,6 +48,21 @@ def test_setup_grok_uses_official_toml_and_permission_rules():
     assert "read-only" not in setup
 
 
+def test_setup_claude_uses_mcp_json_and_settings_allow():
+    setup = _read("SETUP.md")
+    assert ".mcp.json" in setup
+    assert "~/.claude.json" in setup or "%USERPROFILE%\\.claude.json" in setup
+    assert '"timeout": 600000' in setup
+    assert "mcp__agent-bridge__*" in setup
+    assert "claude-agent-acp" in setup
+    assert "@agentclientprotocol/claude-agent-acp" in setup
+    assert "code.claude.com/docs/en/mcp" in setup
+    assert "permissions.defaultMode" in setup
+    assert "Do not put `mcpServers` in `settings.json`" in setup
+    assert "CLAUDE.md" in setup
+    assert "smoke_claude_coordinator.py" in setup
+
+
 def test_setup_zcode_points_at_mcp_settings_not_plugin_marketplace():
     setup = _read("SETUP.md")
     assert "zcode.z.ai/cn/docs/mcp-services" in setup
@@ -59,6 +75,18 @@ def test_setup_zcode_points_at_mcp_settings_not_plugin_marketplace():
 def test_orchestration_english_stays_under_char_budget():
     text = _read("ORCHESTRATION.md")
     assert len(text) <= 9500
+
+
+def test_readme_explains_coordinator_modes():
+    readme = _read("README.md")
+    for token in ("manual", "auto", "eager", "AGENT_BRIDGE_MODE"):
+        assert token in readme
+    assert "does not ask" in readme
+    assert "不会询问" in readme
+    assert "[coordinator] mode" in readme
+    assert "ORCHESTRATION.md" in readme
+    assert "ORCHESTRATION.zh-CN.md" in readme
+    assert "协调规则书" in readme
 
 
 def test_live_workspace_is_local_lab_not_pytest():
@@ -88,6 +116,8 @@ def test_orchestration_keeps_worker_loop_rules_in_both_languages():
             "dispatch_enabled",
             "runtime_context",
             "git diff",
+            "stall_timeout_sec",
+            "silent_for_sec",
         ):
             assert token in text
     assert "timeout" in en.lower()
@@ -99,5 +129,14 @@ def test_orchestration_keeps_worker_loop_rules_in_both_languages():
     assert "empty Kimi" in en
     assert "空文本" in zh or "warnings" in zh
     assert "cancel_task" in en
+    assert "same `session_id` can switch models" in en
+    assert "同一个 `session_id` 可以切换模型" in zh
     assert "nested/" in en
     assert "nested/" in zh
+
+
+def test_skill_mentions_stall_watchdog():
+    skill = _read("skills/agent-bridge/SKILL.md")
+    assert "stall_timeout_sec" in skill
+    assert "silent_for_sec" in skill
+    assert _read("README.md").count("stall_timeout_sec") >= 2
